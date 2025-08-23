@@ -1,0 +1,9 @@
+Team,Map,Opponent,Best3HillSum,Hills
+OUG,Apocalypse,Q9,130.0,"['P1', 'P2', 'P3']"
+GodL,Summit,SPG,121.0,"['P2', 'P3', 'P4']"
+Wolves,Combine,Q9,117.0,"['P2', 'P3', 'P4']"
+SPG,Hacienda,XROCK,112.0,"['P2', 'P3', 'P4']"
+XROCK,Summit,WL,105.0,"['P2', 'P3', 'P4']"
+Q9,Summit,XROCK,103.0,"['P1', 'P2', 'P3']"
+XLR8,Hacienda,GodL,96.0,"['P4', 'P1', 'P2']"
+WL,Summit,XROCK,75.0,"['P4', 'P1', 'P2']"
