@@ -60,8 +60,8 @@ def main():
     df['Winner'] = df['Winner'].replace('Xrock', 'XROCK')
     # Convert blank strings or whitespace-only to NaN
     df['PlantSite'] = df['PlantSite'].replace(r'^\s*$', np.nan, regex=True)
-    week3_mask = df['Date'] >= '2025-08-14'
-    df = df[week3_mask]
+    # week3_mask = df['Date'] >= '2025-08-14'
+    # df = df[week3_mask]
     df_snd = df.copy()
 
     # LEADERBOARD
@@ -91,6 +91,19 @@ def main():
     # Save leaderboard
     fb_leaderboard.to_csv(f'{OUT_PATH}/fb_leaderboard.csv', index=False)
     print("FB leaderboard saved to 'fb_leaderboard.csv'.")
+
+    # FBs per team
+    fb_per_team = (
+        df_snd.groupby('FBTeam')
+            .size()
+            .reset_index(name='TotalFBs')
+            .sort_values('TotalFBs', ascending=False)
+    )
+    fb_rate_per_team = (
+        fb_per_team.merge(rounds_per_team, on='FBTeam', how='left')
+        .assign(FBRate=lambda x: x['TotalFBs'] * 100 / x['RoundsPlayed'])
+        .sort_values('FBRate', ascending=False, ignore_index=True)
+    )
 
     # Count plants per map/site (ignore rounds with no plant)
     plants = (

@@ -42,11 +42,19 @@ def create_df(df):
 
         if final_row.iloc[0]['Score1'] == 250:
             winner = t1
+            loser = t2
             target = 1 # from team1's perspective
 
         else:
             winner = t2
+            loser = t1
             target = 0
+
+        # Final Score difference
+        if winner == t1:
+            score_diff = final_row.iloc[0]['Score1'] - final_row.iloc[0]['Score2']
+        else:
+            score_diff = final_row.iloc[0]['Score2'] - final_row.iloc[0]['Score1']
 
         rotation_rows.append({
             'Map': map_,
@@ -56,7 +64,9 @@ def create_df(df):
             'Score2_P4': score2_last,
             'ScoreDiff_P4': score1_last - score2_last,
             'Winner': winner,
-            'Target_T1': target
+            'Loser': loser,
+            'Target_T1': target,
+            'FinalScoreDiff': score_diff,
         })
 
     hp_model_df = pd.DataFrame(rotation_rows)
@@ -337,6 +347,26 @@ def hardpoint_analysis(predict=False):
         })
         curve.to_csv(f'{PRED_OUT_PATH}/hp_curve.csv', index=False)
         print(f"Prediction curve saved to '{PRED_OUT_PATH}/hp_curve.csv'.")
+
+        # Average score difference per winner
+        avg_score_diff_winner = hp_model_df.groupby('Winner')['FinalScoreDiff'].mean().reset_index()
+
+        avg_score_diff_winner = avg_score_diff_winner.rename(columns={'FinalScoreDiff': 'AvgScoreDiff_Winner', 'Winner': 'Team'})
+
+        # Average score difference per loser
+        avg_score_diff_loser = hp_model_df.groupby('Loser')['FinalScoreDiff'].mean().reset_index()
+        avg_score_diff_loser = avg_score_diff_loser.rename(columns={'FinalScoreDiff': 'AvgScoreDiff_Loser', 'Loser': 'Team'})
+
+        # Merge winner and loser averages
+        avg_score_diff = avg_score_diff_winner.merge(avg_score_diff_loser, on='Team', how='outer').fillna(0)
+
+        avg_score_diff['AvgScoreDiff'] = avg_score_diff['AvgScoreDiff_Winner'] - avg_score_diff['AvgScoreDiff_Loser']
+
+        avg_score_diff = avg_score_diff[['Team', 'AvgScoreDiff']]
+
+        avg_score_diff = avg_score_diff.sort_values('AvgScoreDiff', ascending=False, ignore_index=True)
+        team_stats_df = team_stats_df.merge(avg_score_diff, on='Team', how='left')
+        team_stats_df.to_csv(f'{OUT_PATH}/team_stats.csv', index=False)
 
 if __name__ == "__main__":
     hardpoint_analysis(predict=True)
