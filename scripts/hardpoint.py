@@ -63,13 +63,15 @@ def aggregate_team_stats(df: pd.DataFrame, long_pts: pd.DataFrame, teams: List[s
         # --- Rotation win % ---
         rotation = (
             teams_played[teams_played['is_rotator']]
-            .groupby(group_keys)['RotationWin']
-            .apply(lambda x: (x == 'Yes').mean() * 100)
+            .groupby(group_keys)['RotWin']
+            .mean() * 100
         )
         # --- Break success % ---
-        opp = teams_played[~teams_played['is_rotator']].groupby(group_keys).size()
-        breaks = teams_played[(teams_played['is_breaker']) & (teams_played['BreakSuccess']=='Yes')].groupby(group_keys).size()
-        break_rate = (breaks / opp * 100)
+        breaks = (
+            teams_played[teams_played['is_breaker']]
+            .groupby(group_keys)['BreakWin']
+            .mean() * 100
+        )
         # --- Scrap time per hill ---
         scrap = teams_played[teams_played['is_scrapper']].groupby(group_keys)['ScrapTime'].sum()
         hills_played = teams_played.groupby(group_keys).size()
@@ -79,7 +81,7 @@ def aggregate_team_stats(df: pd.DataFrame, long_pts: pd.DataFrame, teams: List[s
         # Combine everything
         out = pd.DataFrame({
             'RotationWin%': rotation.round(2),
-            'BreakSuccess%': break_rate.round(2),
+            'BreakSuccess%': breaks.round(2),
             'ScrapTimePerHill': scrap_per_hill.round(2),
             'AvgPoints': avg_points.round(2),
         }).reset_index()
@@ -192,9 +194,8 @@ def prep_pred_df(df: pd.DataFrame) -> pd.DataFrame:
         logging.error(f"An unexpected error occurred: {e}")
         return pd.DataFrame()
 
-def _prep_wr_df(df: pd.DataFrame) -> pd.DataFrame:
+def prep_games_df(df: pd.DataFrame) -> pd.DataFrame:
     """Helper to prepare winrate DataFrame."""
-    games = []
     try:
         # Keep only rows where either team hit 250
         finals = df[(df['Score1'] == 250) | (df['Score2'] == 250)]
@@ -218,19 +219,28 @@ def _prep_wr_df(df: pd.DataFrame) -> pd.DataFrame:
         logging.error(f"An unexpected error occurred: {e}")
         return pd.DataFrame()
     
-def _calc_wr(df: pd.DataFrame, teams: List) -> pd.DataFrame:
+def calc_wr(df: pd.DataFrame, teams: List, group_keys: List[str] = ['Team']) -> pd.DataFrame:
     """Helper to calculate winrates."""
     try:
-        team_wins = df.groupby('Winner').size()
-        team_losses = df.groupby('Loser').size()
-        wr_df = pd.DataFrame({
-            'Wins': team_wins,
-            'Losses': team_losses
-        }).fillna(0)
+        # --- wins ---
+        wins = (
+            df.groupby(group_keys[:-1] + ['Winner']).size()
+            .rename('Wins')
+            .reset_index()
+            .rename(columns={'Winner':'Team'})
+        )
+        # --- losses ---
+        losses = (
+            df.groupby(group_keys[:-1] + ['Loser']).size()
+            .rename('Losses')
+            .reset_index()
+            .rename(columns={'Loser':'Team'})
+        )
+        # --- combine ---
+        wr_df = pd.merge(wins, losses, on=group_keys, how='outer').fillna(0)
+        wr_df = wr_df[wr_df['Team'].isin(teams)]
+        wr_df[['Wins','Losses']] = wr_df[['Wins','Losses']].astype(int)
         wr_df['WinRate%'] = (wr_df['Wins'] / (wr_df['Wins'] + wr_df['Losses']) * 100).round(2)
-        wr_df = wr_df.reset_index().rename(columns={'index':'Team'})
-        # Filter for relevant teams
-        wr_df = wr_df[wr_df['Team'].isin(teams)].sort_values('WinRate%', ascending=False)
         return wr_df
     except KeyError as e:
         logging.error(f"Missing expected column: {e}")
@@ -239,23 +249,23 @@ def _calc_wr(df: pd.DataFrame, teams: List) -> pd.DataFrame:
         logging.error(f"An unexpected error occurred: {e}")
         return pd.DataFrame()
     
-def get_winrates(df: pd.DataFrame, teams: List, return_games_df: bool = True) -> pd.DataFrame:
-    """Calculate winrates for each team."""
-    try:
-        # Prepare games DataFrame
-        games_df = _prep_wr_df(df)
-        # Assert games_df is not empty
-        assert not games_df.empty, "Games DataFrame is empty."
-        # Calculate winrates
-        wr_df = _calc_wr(games_df, teams)
-        # Assert wr_df is not empty
-        assert not wr_df.empty, "Winrate DataFrame is empty."
-        if return_games_df:
-            return wr_df, games_df
-        return wr_df
-    except Exception as e:
-        logging.error(f"An unexpected error occurred: {e}")
-        return pd.DataFrame()
+# def get_winrates(df: pd.DataFrame, teams: List, return_games_df: bool = True) -> pd.DataFrame:
+#     """Calculate winrates for each team."""
+#     try:
+#         # Prepare games DataFrame
+#         games_df = _prep_wr_df(df)
+#         # Assert games_df is not empty
+#         assert not games_df.empty, "Games DataFrame is empty."
+#         # Calculate winrates
+#         wr_df = _calc_wr(games_df, teams)
+#         # Assert wr_df is not empty
+#         assert not wr_df.empty, "Winrate DataFrame is empty."
+#         if return_games_df:
+#             return wr_df, games_df
+#         return wr_df
+#     except Exception as e:
+#         logging.error(f"An unexpected error occurred: {e}")
+#         return pd.DataFrame()
     
 
 

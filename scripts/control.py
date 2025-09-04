@@ -1,241 +1,238 @@
-import os
 import pandas as pd
-import numpy as np
-from sklearn.linear_model import LogisticRegression
-from statsmodels.stats.proportion import proportion_confint
 
-# Suppress pandas warnings
-pd.options.mode.chained_assignment = None
-
-# --- CONFIG ---
-FILE_PATH = 'Week2/Control/control.xlsx'
-OUT_PATH = 'Week3/Control'
-SEED = 42
-N_BOOT = 1000
-LIFE_COL = 'LifeDiff_2Seg'
-TIME_COL = 'TimeTo2Ticks'
-
-# Make sure output directory exists
-os.makedirs(OUT_PATH, exist_ok=True)
-
-# --- HELPER FUNCTIONS ---
-def parse_diff(s):
+# Helpers
+def _parse_diff(s: str):
     try:
         off, defe = s.split('/')
         return int(off) - int(defe)
-    except:
+    except Exception as e:
+        print(f"Error parsing life diff '{s}': {e}")
         return pd.NA
 
-def get_off_lives(s):
+def _get_off_lives(s: str):
     try:
         return int(s.split('/')[0])
-    except:
+    except Exception as e:
+        print(f"Error parsing off lives '{s}': {e}")
         return pd.NA
 
-def get_def_lives(s):
+def _get_def_lives(s: str):
     try:
         return int(s.split('/')[1])
-    except:
+    except Exception as e:
+        print(f"Error parsing def lives '{s}': {e}")
         return pd.NA
+    
+def load_data(file_path: str) -> pd.DataFrame:
+    df = pd.read_excel(file_path)
+    # Ensure Date is a date (stringify to avoid timezone issues in ID)
+    df['Date'] = pd.to_datetime(df['Date']).dt.strftime("%Y-%m-%d")
+    # Build a stable team-pair token (order-free) and a MatchID: Date + Map + Teams
+    df['TeamPair'] = df.apply(lambda r: " vs ".join(sorted([str(r['Offense']), str(r['Defense'])])), axis=1)
+    df['MatchID'] = df['Date'] + " | " + df['Map'].astype(str) + " | " + df['TeamPair']
+    # Create side win flag for Offense
+    df['Off_Win'] = (df['Winner'] == df['Offense']).astype(int)
+    df['LifeDiff_2Seg'] = df['Off/Def-2T'].apply(_parse_diff)
+    df['LifeDiff_End'] = df['Off/Def_RoundEnd'].apply(_parse_diff)
+    df['OffLivesEnd'] = df['Off/Def_RoundEnd'].apply(_get_off_lives)
+    df['DefLivesEnd'] = df['Off/Def_RoundEnd'].apply(_get_def_lives)
+    return df
 
-def convert_to_seconds(t):
-    try:
-        minutes, seconds = map(int, t.split(':'))
-        return 120 - (minutes * 60 + seconds)
-    except:
-        return pd.NA
-
-def control_analysis(predict=False):
-    # --- LOAD AND PREPARE DATA ---
-    df_full = pd.read_excel(FILE_PATH) # select subset, as needed
-
-    # Feature Engineering
-    df_full['Off_Win'] = (df_full['Winner'] == df_full['Offense']).astype(int)
-    df_full['LifeDiff_2Seg'] = df_full['Off/Def-2T'].apply(parse_diff)
-    df_full['LifeDiff_End'] = df_full['Off/Def_RoundEnd'].apply(parse_diff)
-    df_full['OffLivesEnd'] = df_full['Off/Def_RoundEnd'].apply(get_off_lives)
-    df_full['DefLivesEnd'] = df_full['Off/Def_RoundEnd'].apply(get_def_lives)
-    df_full['TimeTo2Ticks'] = df_full['2TickTime'].apply(convert_to_seconds)
-
-    week3_mask = df_full['Date'] >= '2025-08-14' # Adjust date as needed
-    df = df_full[week3_mask].copy()
-
-    # --- MAP-LEVEL STATS ---
-    # Side win splits
-    win_split = df.groupby('Map')['Off_Win'].agg(
-        OffenseWins='sum', TotalRounds='count'
-    ).assign(DefenseWins=lambda x: x['TotalRounds'] - x['OffenseWins'],
-            OffenseWinRate=lambda x: x['OffenseWins'] / x['TotalRounds'],
-            DefenseWinRate=lambda x: x['DefenseWins'] / x['TotalRounds']
-    ).reset_index()
-
-    win_split.drop(columns=['OffenseWins', 'DefenseWins', 'TotalRounds'], inplace=True)
-
-    # Zone capture frequencies per map
-    zone_counts = []
-    for _, row in df.iterrows():
-        z = row['Zone(s) Captures']
-        if pd.isna(z):
-            continue
-        zones = [z] if z in ['A', 'B'] else ['A', 'B']
-        for zone in zones:
-            zone_counts.append((row['Map'], zone))
-    zone_df = pd.DataFrame(zone_counts, columns=['Map', 'Zone'])
-    zone_freq = (zone_df
-                .groupby(['Map', 'Zone'])
-                .size()
-                .reset_index(name='Count')
-                .pivot(index='Map', columns='Zone', values='Count')
-                .fillna(0)).reset_index()
-
-    zone_freq.rename(columns={'A': 'A Captures', 'B': 'B Captures'}, inplace=True)
-
-    # Total games played per map
-    total_games = df['Map'].value_counts().reset_index()
-    total_games.columns = ['Map', 'TotalRounds']
-
-    # Merge zone frequencies with total games
-    zone_freq = zone_freq.merge(total_games, on='Map')
-
-    # Combine with map win splits
-    map_summary = win_split.merge(zone_freq, on='Map')
-    map_summary.to_csv(f'{OUT_PATH}/map_summary.csv', index=False)
-    print("Map-level summary saved to 'map_summary.csv'.")
-
-    # --- TEAM-LEVEL STATS ---
-    teams = pd.unique(df[['Offense','Defense']].values.ravel())
-    life_diff_records = []
-
-    for team in teams:
-        # Select only the rounds where this team played
-        mask = (df['Offense'] == team) | (df['Defense'] == team)
-        # Compute differential per round from that team's perspective
-        diffs = df.loc[mask].apply(
-            lambda r: (r['OffLivesEnd'] - r['DefLivesEnd'])
-                    if r['Offense'] == team
-                    else (r['DefLivesEnd'] - r['OffLivesEnd']),
-            axis=1
+def win_splits(df: pd.DataFrame, teams: list) -> pd.DataFrame:
+    # Per-map, per-team win splits
+    team_win_split = (
+        df
+        .melt(
+            id_vars=['Map', 'Off_Win'],
+            value_vars=['Offense', 'Defense'],
+            var_name='Side',
+            value_name='Team'
         )
-        life_diff_records.append({
-            'Team': team,
-            'AvgLifeDiff': diffs.mean()
-        })
+        .assign(
+            RoundWin=lambda x: (
+                (x['Side'] == 'Offense') & (x['Off_Win'] == 1) |
+                (x['Side'] == 'Defense') & (x['Off_Win'] == 0)
+            ).astype(int)
+        )
+        .groupby(['Map', 'Team', 'Side'])
+        .agg(
+            Rounds=('RoundWin', 'count'),
+            Wins=('RoundWin', 'sum')
+        )
+        .assign(WinRate=lambda x: x['Wins'] / x['Rounds'])
+        .reset_index()
+    )
+    team_win_split = team_win_split[team_win_split['Team'].isin(teams)]
+    # Pivot to get offense/defense side-by-side
+    team_map_split = (
+        team_win_split
+        .pivot(index=['Map', 'Team'], columns='Side', values='WinRate')
+        .reset_index()
+        .rename_axis(None, axis=1)   # remove multi-index name
+        .rename(columns={'Offense': 'OffenseWinRate', 'Defense': 'DefenseWinRate'})
+    )
+    return team_map_split
 
-    # Create DataFrame of results
-    life_diff = pd.DataFrame(life_diff_records)
-
-    records = []
-    for team in teams:
-        played = df[(df['Offense']==team)|(df['Defense']==team)]
-        wins = (played['Winner']==team).sum()
-        losses = len(played) - wins
-        records.append({'Team': team, 'RoundDiff': wins - losses})
-
-    round_diff = pd.DataFrame(records)
-
+def avg_off_ticks(df: pd.DataFrame, teams: list) -> pd.DataFrame:
     ticks_off_overall = (
-        df.groupby('Offense', as_index=False)
+        df.groupby(['Map','Offense'], as_index=False)
         .agg(TicksCaptured=('OffTicks','sum'), OffenseRounds=('OffTicks','size'))
         .assign(AvgTicksPerOffRound=lambda d: d['TicksCaptured'] / d['OffenseRounds'].where(d['OffenseRounds']>0, pd.NA))
         .rename(columns={'Offense':'Team'})
         .sort_values('TicksCaptured', ascending=False)
     )
+    ticks_off_overall = ticks_off_overall[ticks_off_overall['Team'].isin(teams)]
+    # pivot table to have maps as columns
+    ticks_off_overall = ticks_off_overall.pivot(index='Team', columns='Map', values='AvgTicksPerOffRound')
+    ticks_off_overall = ticks_off_overall.fillna(0).reset_index()
+    ticks_off_overall = ticks_off_overall.rename_axis(None, axis=1)   # remove multi-index name
+    ticks_off_overall = ticks_off_overall.round(2)
+    return ticks_off_overall
+
+def avg_def_ticks(df: pd.DataFrame, teams:list) -> pd.DataFrame:
     ticks_def_overall = (
-        df.groupby('Defense', as_index=False)
+        df.groupby(['Map','Defense'], as_index=False)
             .agg(TicksAllowed=('OffTicks','sum'), DefenseRounds=('OffTicks','size'))
             .assign(AvgTicksAllowedPerDefRound=lambda d: d['TicksAllowed'] / d['DefenseRounds'].where(d['DefenseRounds']>0, pd.NA))
             .rename(columns={'Defense':'Team'})
+            .sort_values('TicksAllowed', ascending=True)
     )
+    ticks_def_overall = ticks_def_overall[ticks_def_overall['Team'].isin(teams)]
+    # pivot table to have maps as columns
+    ticks_def_overall = ticks_def_overall.pivot(index='Team', columns='Map', values='AvgTicksAllowedPerDefRound')
+    ticks_def_overall = ticks_def_overall.fillna(0).reset_index()
+    ticks_def_overall = ticks_def_overall.rename_axis(None, axis=1)   # remove multi-index name
+    ticks_def_overall = ticks_def_overall.round(2)
+    return ticks_def_overall
 
-    ticks_profile_overall = (
-        pd.merge(ticks_off_overall, ticks_def_overall, on='Team', how='outer')
-            .fillna({'TicksCaptured':0, 'OffenseRounds':0, 'AvgTicksPerOffRound':0,
-                    'TicksAllowed':0, 'DefenseRounds':0, 'AvgTicksAllowedPerDefRound':0})
-            .sort_values('TicksCaptured', ascending=False)
-    )
-
-    # Merge all team-level stats
-    team_summary = (life_diff
-                    .merge(round_diff, on='Team', how='outer')
-                    .merge(ticks_profile_overall, on='Team', how='outer')
-                )
-    team_summary.to_csv(f'{OUT_PATH}/team_summary.csv', index=False)
-    print("Team-level summary saved to 'team_summary.csv'.")
-
-    # --- LIFE-DIFF CURVE ---
-    if predict:
-        # Prepare raw data
-        df_clean = (
-            df_full
-            .dropna(subset=[LIFE_COL, TIME_COL, 'Off_Win'])
-            .copy()
+def tick_profile(df: pd.DataFrame, teams: list) -> pd.DataFrame:
+    tick_profile_overall = (
+        pd.merge(
+            avg_off_ticks(df, teams),
+            avg_def_ticks(df, teams),
+            on='Team',
+            how='outer',
+            suffixes=('_Captured', '_Allowed')
         )
-        X_life = df_clean[LIFE_COL].to_numpy().reshape(-1, 1)
-        X_time = df_clean[TIME_COL].to_numpy().reshape(-1, 1)
-        y = df_clean['Off_Win'].astype(int).to_numpy()
+    )
+    return tick_profile_overall
 
-        # Stack features: [LifeDiff, TwoTickTime]
-        X = np.hstack([X_life, X_time])
+def calc_wr(df: pd.DataFrame, teams: list, by_map: bool = False) -> pd.DataFrame:
+    # Decide grouping keys
+    match_keys = ['MatchID'] + (['Map'] if by_map else [])
 
-        # Fit logistic regression on raw rounds (2D)
-        log_reg = LogisticRegression(solver='lbfgs', max_iter=1000)
-        log_reg.fit(X, y)
+    # --- Round wins per match per team ---
+    round_counts = (
+        df.groupby(match_keys + ['Winner'])
+          .size()
+          .reset_index(name='RoundWins')
+    )
 
-        # Build prediction grid along LifeDiff only, holding time at reference(s)
-        x_min, x_max = X_life.min(), X_life.max()
-        pad = max(1.0, 0.1 * (x_max - x_min))
-        life_grid = np.linspace(x_min - pad, x_max + pad, 201)[:, None]
+    # --- Match winners (first to 4 rounds) ---
+    match_winners = (
+        round_counts.loc[round_counts.groupby(match_keys)['RoundWins'].idxmax()]
+    )
+    match_winners = match_winners[match_winners['RoundWins'] >= 4] \
+                                 .rename(columns={'Winner': 'MatchWinner'}) \
+                                 [match_keys + ['MatchWinner']]
 
-        # Time references (for plotting lines): median (main), and optional fast/slow (25th/75th)
-        t_median = np.median(X_time)
-        t_p25    = np.percentile(X_time, 25)
-        t_p75    = np.percentile(X_time, 75)
+    # --- Participants per match ---
+    participants = (
+        df.groupby(match_keys)
+          .apply(lambda g: sorted(set(g['Offense']).union(set(g['Defense']))))
+          .reset_index(name='Teams')
+    )
+    team_match_rows = participants.explode('Teams').rename(columns={'Teams': 'Team'})
 
-        # Helper to predict over life grid for a fixed time value
-        def predict_at_time(t_fixed):
-            Xg = np.hstack([life_grid, np.full_like(life_grid, fill_value=t_fixed)])
-            return log_reg.predict_proba(Xg)[:, 1]
+    # --- Games played (only include decided matches) ---
+    decided_matches = team_match_rows[
+        team_match_rows['MatchID'].isin(match_winners['MatchID'])
+    ]
+    if by_map:
+        decided_matches = decided_matches.merge(
+            match_winners[match_keys], on=match_keys, how='inner'
+        )
+    games_played = (
+        decided_matches.groupby(['Team'] + (['Map'] if by_map else []))
+                       .size()
+                       .reset_index(name='Games')
+    )
 
-        p_med  = predict_at_time(t_median)
-        p_fast = predict_at_time(t_p25)   # "faster" reach to 2 ticks (lower time)
-        p_slow = predict_at_time(t_p75)   # "slower" reach to 2 ticks (higher time)
+    # --- Wins per team ---
+    wins = (
+        decided_matches.merge(match_winners, on=match_keys, how='inner')
+                       .assign(Win=lambda x: (x['Team'] == x['MatchWinner']).astype(int))
+                       .groupby(['Team'] + (['Map'] if by_map else []))['Win']
+                       .sum()
+                       .reset_index(name='Wins')
+    )
 
-        # Bootstrap CIs (for median-time curve)
-        rng = np.random.default_rng(SEED)
-        boot_preds = np.full((N_BOOT, life_grid.shape[0]), np.nan, dtype=float)
+    # --- Win rate ---
+    win_rates = (
+        games_played.merge(wins, on=['Team'] + (['Map'] if by_map else []), how='left')
+                    .fillna({'Wins': 0})
+                    .assign(WinRate=lambda x: x['Wins'] / x['Games'])
+                    .sort_values(['WinRate', 'Wins', 'Games'], ascending=[False, False, False])
+                    .reset_index(drop=True)
+    )
 
-        for i in range(N_BOOT):
-            idx = rng.integers(0, len(X), size=len(X))  # sample rows with replacement
-            Xb, yb = X[idx], y[idx]
-            try:
-                m = LogisticRegression(solver='lbfgs', max_iter=1000)
-                m.fit(Xb, yb)
-                # predict on life grid at median time
-                Xg_med = np.hstack([life_grid, np.full_like(life_grid, fill_value=t_median)])
-                boot_preds[i, :] = m.predict_proba(Xg_med)[:, 1]
-            except Exception:
-                # leave this bootstrap row as NaNs on failure (rare with small samples / separation)
-                pass
+    win_rates = win_rates[win_rates['Team'].isin(teams)].reset_index(drop=True)
+    win_rates['WinRate'] = win_rates['WinRate'].round(2)
 
-        ci_low  = np.nanpercentile(boot_preds,  2.5, axis=0)
-        ci_high = np.nanpercentile(boot_preds, 97.5, axis=0)
+    return win_rates
 
-        # Save CSV for Datawrapper ---
-        out = pd.DataFrame({
-            'LifeDiff': life_grid.ravel(),
-            'WinProb_medTime': p_med,     # main curve (time fixed at median)
-            'CI_low': ci_low,             # 95% CI around the median-time curve
-            'CI_high': ci_high,
-            'WinProb_fastTime': p_fast,   # optional comparison lines (no CI)
-            'WinProb_slowTime': p_slow
-        })
+def zone_caps(df: pd.DataFrame, teams: list) -> pd.DataFrame:
+    # --- Step 1: Build long-form zone captures ---
+    zone_long = (
+        df
+        .dropna(subset=['Zone(s) Captures'])
+        .assign(
+            Zones=lambda x: x['Zone(s) Captures'].map(
+                lambda z: ['A', 'B'] if z not in ['A', 'B'] else [z]
+            )
+        )
+        .explode('Zones')
+        [['Map', 'Offense', 'Zones']]
+        .rename(columns={'Offense': 'Team', 'Zones': 'Zone'})
+    )
 
-        # (Optional) include the numeric time references used (seconds) as columns for clarity
-        out.attrs = {'t_median': float(t_median), 't_p25': float(t_p25), 't_p75': float(t_p75)}
-        out.to_csv(f"{OUT_PATH}/life_diff_curve.csv", index=False)
+    # --- Step 2: Raw counts of A/B captures ---
+    zone_counts = (
+        zone_long
+        .groupby(['Map', 'Team', 'Zone'])
+        .size()
+        .reset_index(name='Count')
+        .pivot(index=['Map', 'Team'], columns='Zone', values='Count')
+        .fillna(0)
+        .reset_index()
+        .rename(columns={'A': 'A Captures', 'B': 'B Captures'})
+    )
 
-        print(f"Saved curve (2-feature model; LifeDiff on x-axis) with CI at median {TIME_COL}: {OUT_PATH}/life_diff_curve.csv")
-        print(f"Time refs used — median: {t_median:.2f}, p25: {t_p25:.2f}, p75: {t_p75:.2f} (same units as {TIME_COL})")
+    # --- Step 3: Total offensive rounds per team per map ---
+    off_rounds = (
+        df
+        .groupby(['Map', 'Offense'])
+        .size()
+        .reset_index(name='TotalOffRounds')
+        .rename(columns={'Offense': 'Team'})
+    )
 
-if __name__ == "__main__":
-    control_analysis(predict=True)
+    # --- Step 4: Merge and compute capture rates ---
+    zone_freq_team = (
+        zone_counts.merge(off_rounds, on=['Map', 'Team'], how='left')
+    )
+
+    for zone in ['A', 'B']:
+        zone_freq_team[f'{zone} CaptureRate'] = (
+            zone_freq_team[f'{zone} Captures'] / zone_freq_team['TotalOffRounds'] * 100
+        )
+
+    # Final tidy DataFrame
+    zone_freq_team = zone_freq_team[
+        ['Map', 'Team',
+        'A Captures', 'B Captures',
+        'A CaptureRate', 'B CaptureRate']
+    ]
+    zone_freq_team = zone_freq_team[zone_freq_team['Team'].isin(teams)].reset_index(drop=True)
+    zone_freq_team[['A CaptureRate', 'B CaptureRate']] = zone_freq_team[['A CaptureRate', 'B CaptureRate']].round(1)
+    return zone_freq_team
