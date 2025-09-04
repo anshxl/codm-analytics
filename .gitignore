@@ -17,3 +17,12 @@ Data/
 
 # XLR8 directory
 XLR8/
+
+# ruff cache
+.ruff_cache/
+
+# Notebooks
+ttk.ipynb
+
+# Scripts
+benchmarking_ttk.py
