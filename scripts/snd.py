@@ -205,7 +205,7 @@ def compute_retake_rate(df: pd.DataFrame, teams: List[str]) -> pd.DataFrame:
 
     # Pivot so you get columns per (Defense, PlantSite)
     agg = (
-        agg.pivot(index=['Map', 'PlantSite'], columns='Defense', values='RetakeRate')
+        agg.pivot(index=['Map', 'PlantSite'], columns='Defense', values=['SuccessfulRetakes','RetakeRate'])
            .fillna(0)
            .reset_index()
     )

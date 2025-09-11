@@ -66,6 +66,11 @@ def aggregate_team_stats(df: pd.DataFrame, long_pts: pd.DataFrame, teams: List[s
             .groupby(group_keys)['RotWin']
             .mean() * 100
         )
+        # --- Rotate first % ---
+        rotate_first_counts = teams_played.groupby(group_keys)['is_rotator'].sum()
+        total_hills = teams_played.groupby(group_keys).size()
+        rotate_first_pct = (rotate_first_counts / total_hills * 100).round(2)
+
         # --- Break success % ---
         breaks = (
             teams_played[teams_played['is_breaker']]
@@ -80,6 +85,7 @@ def aggregate_team_stats(df: pd.DataFrame, long_pts: pd.DataFrame, teams: List[s
         avg_points = long_pts.groupby(group_keys)['Points'].mean()
         # Combine everything
         out = pd.DataFrame({
+            'RotateFirst%': rotate_first_pct.round(2),
             'RotationWin%': rotation.round(2),
             'BreakSuccess%': breaks.round(2),
             'ScrapTimePerHill': scrap_per_hill.round(2),
@@ -140,7 +146,7 @@ def calc_control_share(df: pd.DataFrame, teams: List) -> pd.DataFrame:
     control_share.columns = ['Team', 'ControlSharePct']
     # --- Sort & filter ---
     control_share = control_share.sort_values('ControlSharePct', ascending=False)
-    control_share = control_share[control_share['Team'].isin(teams)]
+    control_share = control_share[control_share['Team'].isin(teams)].round(2)
     return control_share
 
 def prep_pred_df(df: pd.DataFrame) -> pd.DataFrame:
